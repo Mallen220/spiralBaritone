@@ -95,6 +95,53 @@ public class GridTorch extends Module {
         .build()
     );
 
+    // Nav timeout / retry tuning (user-adjustable to avoid premature skipping of long routes)
+    public final Setting<Integer> navGraceTicks = sgGeneral.add(new IntSetting.Builder()
+        .name("nav-grace-ticks")
+        .description("Ticks to wait for Baritone to begin pathing before considering the target unreachable (higher = wait longer)")
+        .defaultValue(200)
+        .min(20)
+        .max(6000)
+        .build()
+    );
+
+    public final Setting<Integer> maxNavRetries = sgGeneral.add(new IntSetting.Builder()
+        .name("max-nav-retries")
+        .description("Number of retry attempts for a navigation target before skipping it")
+        .defaultValue(3)
+        .min(0)
+        .max(10)
+        .build()
+    );
+
+    // ETA-based grace settings (estimate how long Baritone may need and add margin)
+    public final Setting<Double> etaSafetyMultiplier = sgGeneral.add(new DoubleSetting.Builder()
+        .name("eta-safety-multiplier")
+        .description("Safety multiplier applied to the ETA when deciding whether to wait longer for Baritone")
+        .defaultValue(2.0)
+        .min(1.0)
+        .max(10.0)
+        .build()
+    );
+
+    public final Setting<Integer> etaAdditiveTicks = sgGeneral.add(new IntSetting.Builder()
+        .name("eta-additive-ticks")
+        .description("Additional fixed ticks to add to the ETA safety margin")
+        .defaultValue(40)
+        .min(0)
+        .max(6000)
+        .build()
+    );
+
+    public final Setting<Integer> etaMaxGraceTicks = sgGeneral.add(new IntSetting.Builder()
+        .name("eta-max-grace-ticks")
+        .description("Maximum ETA-based grace (ticks) to allow for extreme distances")
+        .defaultValue(6000)
+        .min(100)
+        .max(60000)
+        .build()
+    );
+
     // Terrain constraints
     public final Setting<Boolean> stopOnWater = sgTerrain.add(new BoolSetting.Builder()
         .name("water-boundary")
@@ -236,8 +283,7 @@ public class GridTorch extends Module {
     private boolean lastSubmissionAccepted = false;
     private int retryCountForCurrentTarget = 0;
 
-    private static final int CURRENT_TARGET_GRACE_TICKS = 40; // grace before marking unreachable
-    private static final int MAX_CURRENT_TARGET_RETRIES = 1;
+    // Removed fixed constants — these are now configurable via settings below.
 
     public GridTorch() {
         super(AddonTemplate.CATEGORY, "grid-torch", "Automatically walk a rectangular grid and place torches at configurable spacing.");
@@ -400,9 +446,25 @@ public class GridTorch extends Module {
                 return;
             }
 
-            if (!isPathing && currentTargetAgeTicks >= CURRENT_TARGET_GRACE_TICKS) {
-                // try one retry then skip
-                if (lastSubmissionAccepted && retryCountForCurrentTarget < MAX_CURRENT_TARGET_RETRIES) {
+            // Consider ETA-based grace before deciding to skip a target. This allows long-distance
+            // navigation goals to complete instead of being prematurely skipped.
+            int effectiveGrace = navGraceTicks.get();
+            if (currentNavTarget != null) {
+                try {
+                    int etaGrace = computeETAGraceFor(currentNavTarget);
+                    effectiveGrace = Math.max(effectiveGrace, etaGrace);
+
+                    if (effectiveGrace > navGraceTicks.get() && currentTargetAgeTicks < effectiveGrace) {
+                        AddonTemplate.LOG.info("GridTorch: extending skip-grace to {} ticks for {} (ETA-est={} ticks, safetyMult={}, addTicks={})",
+                            effectiveGrace, currentNavTarget, estimateETAInTicks(currentNavTarget), etaSafetyMultiplier.get(), etaAdditiveTicks.get());
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+
+            if (!isPathing && currentTargetAgeTicks >= effectiveGrace) {
+                // try configured number of retries then skip
+                if (lastSubmissionAccepted && retryCountForCurrentTarget < maxNavRetries.get()) {
                     // Retry via command fallback then loose goal
                     if (executeBaritoneGoto(primaryBaritone, currentNavTarget)) {
                         retryCountForCurrentTarget++;
@@ -1350,6 +1412,40 @@ public class GridTorch extends Module {
         return executeBaritoneCommand(primaryBaritone, cmd);
     }
 
+    // ---------- ETA estimation helpers ----------
+    /**
+     * Conservative ETA estimate (ticks) to reach the provided BlockPos from the player.
+     * Uses straight-line distance with a path-factor and conservative movement-speed assumption.
+     */
+    private int estimateETAInTicks(BlockPos target) {
+        try {
+            if (mc.player == null || target == null) return navGraceTicks.get();
+
+            Vec3d p = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
+            Vec3d t = Vec3d.ofCenter(target);
+            double distance = p.distanceTo(t);
+
+            // Conservative path detour factor and ticks-per-block assumption
+            final double pathFactor = 1.5;            // account for detours / vertical travel
+            final double ticksPerBlock = 5.0;        // ~0.2 blocks/tick (conservative)
+
+            double est = distance * pathFactor * ticksPerBlock;
+            return (int) Math.ceil(est);
+        } catch (Throwable ignored) {
+            return navGraceTicks.get();
+        }
+    }
+
+    /**
+     * Compute ETA-based grace (ticks) using safety multiplier + additive margin, capped by user setting.
+     */
+    private int computeETAGraceFor(BlockPos target) {
+        int est = estimateETAInTicks(target);
+        int safety = (int) Math.ceil(est * etaSafetyMultiplier.get()) + etaAdditiveTicks.get();
+        if (safety > etaMaxGraceTicks.get()) safety = etaMaxGraceTicks.get();
+        return safety;
+    }
+
     // ---------- Preview control ----------
     /**
      * Start a visual-only preview from the player's current block position.
@@ -1421,6 +1517,13 @@ public class GridTorch extends Module {
         makeBlockLegal.set(true);
 
         visualize.set(true);
+
+        // nav tuning defaults
+        navGraceTicks.set(200);
+        maxNavRetries.set(3);
+        etaSafetyMultiplier.set(2.0);
+        etaAdditiveTicks.set(40);
+        etaMaxGraceTicks.set(6000);
 
         try {
             validColor.set(new SettingColor(new java.awt.Color(0, 255, 0)));

@@ -30,6 +30,7 @@ public class AddonTemplate extends MeteorAddon {
         // Grid torch module + command
         Modules.get().add(new com.example.addon.modules.GridTorch());
         Commands.add(new com.example.addon.commands.CommandGridTorch());
+        Commands.add(new com.example.addon.commands.CommandGt());
 
         // Commands
         Commands.add(new CommandExample());

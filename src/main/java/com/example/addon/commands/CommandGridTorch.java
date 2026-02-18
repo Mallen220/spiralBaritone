@@ -59,6 +59,23 @@ public class CommandGridTorch extends Command {
             }
 
             return SINGLE_SUCCESS;
+        }))
+        // help: concise usage summary
+        .then(literal("help").executes(ctx -> {
+            info("gridtorch — usage summary:\n" +
+                "  (no args)                Toggle module\n" +
+                "  start                    Enable GridTorch (convert preview if active)\n" +
+                "  stop                     Disable GridTorch and cancel Baritone\n" +
+                "  pause / resume           Pause or resume an active run (preserves queue)\n" +
+                "  preview / preview stop   Visual-only preview of placements\n" +
+                "  <x> <z> [maxX maxZ]      Set spacing (and optional bounds) then start\n" +
+                "  status                   Show module status and counts\n" +
+                "  maxdip <v>               Set max height delta between placements\n" +
+                "  minlight <0-15>          Skip placements with block light >= value\n" +
+                "  water|breakgrass|breaktree|avoidblocks|shouldSpiral  Toggle/set options\n" +
+                "  resetSettings            Restore defaults\n" +
+                "Examples: .gridtorch 7 7 31 31   .gridtorch preview   .gridtorch shouldSpiral toggle");
+            return SINGLE_SUCCESS;
         }));
 
         // stop
@@ -99,8 +116,8 @@ public class CommandGridTorch extends Command {
             GridTorch m = Modules.get().get(GridTorch.class);
             if (m == null) { info("GridTorch module not found"); return SINGLE_SUCCESS; }
 
-            info(String.format("GridTorch — active=%s paused=%s previewing=%s xSpacing=%d zSpacing=%d maxDistX=%d maxDistZ=%d maxDip=%d minLight=%d water=%s breakGrass=%s breakTree=%s avoidPlayerBlocks=%s avoidTorchesNearby=%s avoidTorchesRadius=%d spiralTraversal=%s",
-                m.isActive(), m.isPaused(), m.isPreviewing(), m.xSpacing.get(), m.zSpacing.get(), m.maxDistX.get(), m.maxDistZ.get(), m.maxDip.get(), m.minLightLevel.get(), m.stopOnWater.get(), m.breakGrass.get(), m.breakTree.get(), m.avoidPlayerBlocks.get(), m.avoidTorchesNearby.get(), m.avoidTorchesRadius.get(), m.spiralTraversal.get()));
+            info(String.format("GridTorch — active=%s paused=%s previewing=%s xSpacing=%d zSpacing=%d maxDistX=%d maxDistZ=%d maxDip=%d minLight=%d water=%s breakGrass=%s breakTree=%s avoidPlayerBlocks=%s avoidTorchesNearby=%s avoidTorchesRadius=%d etaSafetyMultiplier=%.2f etaAdditiveTicks=%d etaMaxGraceTicks=%d navGraceTicks=%d maxNavRetries=%d spiralTraversal=%s",
+                m.isActive(), m.isPaused(), m.isPreviewing(), m.xSpacing.get(), m.zSpacing.get(), m.maxDistX.get(), m.maxDistZ.get(), m.maxDip.get(), m.minLightLevel.get(), m.stopOnWater.get(), m.breakGrass.get(), m.breakTree.get(), m.avoidPlayerBlocks.get(), m.avoidTorchesNearby.get(), m.avoidTorchesRadius.get(), m.etaSafetyMultiplier.get(), m.etaAdditiveTicks.get(), m.etaMaxGraceTicks.get(), m.navGraceTicks.get(), m.maxNavRetries.get(), m.spiralTraversal.get()));
             return SINGLE_SUCCESS;
         }))
         // resetSettings: restore all config to defaults
