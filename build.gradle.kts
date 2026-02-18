@@ -17,6 +17,10 @@ repositories {
         name = "meteor-maven-snapshots"
         url = uri("https://maven.meteordev.org/snapshots")
     }
+    maven {
+        name = "jitpack"
+        url = uri("https://jitpack.io")
+    }
 }
 
 dependencies {
@@ -27,6 +31,9 @@ dependencies {
 
     // Meteor
     modImplementation(libs.meteor.client)
+    
+    // Baritone
+    modImplementation(libs.baritone)
 }
 
 tasks {
