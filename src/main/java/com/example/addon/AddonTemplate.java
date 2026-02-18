@@ -27,6 +27,10 @@ public class AddonTemplate extends MeteorAddon {
         // Square spiral movement
         Modules.get().add(new com.example.addon.modules.SquareSpiral());
 
+        // Grid torch module + command
+        Modules.get().add(new com.example.addon.modules.GridTorch());
+        Commands.add(new com.example.addon.commands.CommandGridTorch());
+
         // Commands
         Commands.add(new CommandExample());
         Commands.add(new com.example.addon.commands.CommandSpiral());
