@@ -245,8 +245,8 @@ public class SpiralBaritone extends Module {
         // Add center position
         path.add(new BlockPos(center.getX() + x, center.getY(), center.getZ() + z));
 
-        // Generate spiral
-        while (steps <= 2 * rad) {
+        // Generate spiral - continue until we cover the full square area
+        while (steps <= 2 * rad + 1) {
             for (int i = 0; i < 2; i++) {
                 for (int j = 0; j < steps; j++) {
                     // Move in current direction
