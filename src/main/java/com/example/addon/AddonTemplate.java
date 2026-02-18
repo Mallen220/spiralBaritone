@@ -24,9 +24,12 @@ public class AddonTemplate extends MeteorAddon {
 
         // Modules
         Modules.get().add(new ModuleExample());
+        // Square spiral movement
+        Modules.get().add(new com.example.addon.modules.SquareSpiral());
 
         // Commands
         Commands.add(new CommandExample());
+        Commands.add(new com.example.addon.commands.CommandSpiral());
 
         // HUD
         Hud.get().register(HudExample.INFO);
