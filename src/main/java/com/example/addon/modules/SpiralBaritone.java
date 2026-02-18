@@ -155,21 +155,21 @@ public class SpiralBaritone extends Module {
             return;
         }
 
-        // Handle delay between goals
-        if (delayBetweenGoals.get() > 0) {
-            tickCounter++;
-            if (tickCounter < delayBetweenGoals.get()) {
-                return;
-            }
-            tickCounter = 0;
-        }
-
         try {
             // Check if Baritone is still pathing
             boolean isPathing = BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().isPathing();
 
             if (!isPathing && !spiralComplete) {
-                // Baritone finished current goal, queue next
+                // Baritone finished current goal, check if we should queue next
+                if (delayBetweenGoals.get() > 0) {
+                    tickCounter++;
+                    if (tickCounter < delayBetweenGoals.get()) {
+                        return;
+                    }
+                    tickCounter = 0;
+                }
+
+                // Queue next goal
                 if (currentGoalIndex < spiralPath.size()) {
                     queueNextGoal();
                 } else {
@@ -242,8 +242,14 @@ public class SpiralBaritone extends Module {
         int direction = 0;
         int steps = 1;
 
-        // Add center position
-        path.add(new BlockPos(center.getX() + x, center.getY(), center.getZ() + z));
+        // Add center position first
+        BlockPos centerPos;
+        if (useRelativeGoals.get()) {
+            centerPos = new BlockPos(0, 0, 0);
+        } else {
+            centerPos = new BlockPos(center.getX(), center.getY(), center.getZ());
+        }
+        path.add(centerPos);
 
         // Generate spiral - continue until we cover the full square area
         while (steps <= 2 * rad + 1) {
@@ -257,12 +263,14 @@ public class SpiralBaritone extends Module {
                         case 3: z--; break; // -Z
                     }
 
-                    // Check if within radius
+                    // Check if within radius (Chebyshev distance)
                     if (Math.max(Math.abs(x), Math.abs(z)) <= rad) {
                         BlockPos pos;
                         if (useRelativeGoals.get()) {
+                            // For relative goals, keep Y=0 as offset
                             pos = new BlockPos(x, 0, z);
                         } else {
+                            // For absolute goals, maintain starting Y elevation
                             pos = new BlockPos(center.getX() + x, center.getY(), center.getZ() + z);
                         }
                         path.add(pos);
