@@ -502,10 +502,30 @@ public class GridTorch extends Module {
             }
         }
 
-        // Render skipped positions (red)
+        // Render skipped positions (red) — omit any preview positions that already have a torch in-world
+        List<BlockPos> removedSkipped = new ArrayList<>();
         for (BlockPos bp : skippedPositions) {
+            try {
+                BlockState above = mc.world.getBlockState(bp.up());
+                if (above.getBlock() == Blocks.TORCH || above.getBlock() == Blocks.WALL_TORCH || above.getBlock() == Blocks.SOUL_TORCH || above.getBlock() == Blocks.SOUL_WALL_TORCH) {
+                    removedSkipped.add(bp);
+                    continue;
+                }
+            } catch (Throwable ignored) {
+            }
+
             Box b = new Box(bp);
             event.renderer.box(b, skippedColor.get(), skippedColor.get(), ShapeMode.Both, 0);
+        }
+
+        // Keep preview lists in sync
+        for (BlockPos r : removedSkipped) {
+            skippedPositions.remove(r);
+            validPositions.remove(r);
+            supportNeededPositions.remove(r);
+            orderedPositions.remove(r);
+            queue.removeIf(p -> p.equals(r));
+            precomputed.remove(r);
         }
     }
 
