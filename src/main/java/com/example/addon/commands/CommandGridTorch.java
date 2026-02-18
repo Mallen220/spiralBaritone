@@ -49,7 +49,15 @@ public class CommandGridTorch extends Command {
                 m.toggle();
             }
 
-            info("GridTorch started");
+            if (m.isActive()) {
+                int remaining = m.getRemainingPlacements();
+                int planned = m.getPlannedTorchCount();
+                if (remaining > 0) info("GridTorch started — remaining=" + remaining + " (total planned=" + planned + ")");
+                else info("GridTorch started — total planned=" + planned);
+            } else {
+                info("GridTorch could not start — no valid torch positions (check settings)");
+            }
+
             return SINGLE_SUCCESS;
         }));
 
@@ -64,6 +72,26 @@ public class CommandGridTorch extends Command {
             if (m.isActive()) m.toggle();
             info("GridTorch stopped (Baritone cancelled)");
             return SINGLE_SUCCESS;
+        }))
+        // pause
+        .then(literal("pause").executes(c -> {
+            GridTorch m = Modules.get().get(GridTorch.class);
+            if (m == null) { info("GridTorch module not found"); return SINGLE_SUCCESS; }
+
+            if (!m.isActive()) { info("GridTorch not active — cannot pause"); return SINGLE_SUCCESS; }
+            m.pause();
+            return SINGLE_SUCCESS;
+        }))
+        // resume
+        .then(literal("resume").executes(c -> {
+            GridTorch m = Modules.get().get(GridTorch.class);
+            if (m == null) { info("GridTorch module not found"); return SINGLE_SUCCESS; }
+
+            if (!m.isActive()) { info("GridTorch not active — enable module or use .gridtorch start"); return SINGLE_SUCCESS; }
+            if (!m.isPaused()) { info("GridTorch is not paused"); return SINGLE_SUCCESS; }
+            m.resume();
+            info("GridTorch resumed — remaining=" + m.getRemainingPlacements());
+            return SINGLE_SUCCESS;
         }));
 
         // status
@@ -71,8 +99,8 @@ public class CommandGridTorch extends Command {
             GridTorch m = Modules.get().get(GridTorch.class);
             if (m == null) { info("GridTorch module not found"); return SINGLE_SUCCESS; }
 
-            info(String.format("GridTorch — active=%s previewing=%s xSpacing=%d zSpacing=%d maxDistX=%d maxDistZ=%d maxDip=%d minLight=%d water=%s breakGrass=%s breakTree=%s avoidPlayerBlocks=%s avoidTorchesNearby=%s avoidTorchesRadius=%d spiralTraversal=%s",
-                m.isActive(), m.isPreviewing(), m.xSpacing.get(), m.zSpacing.get(), m.maxDistX.get(), m.maxDistZ.get(), m.maxDip.get(), m.minLightLevel.get(), m.stopOnWater.get(), m.breakGrass.get(), m.breakTree.get(), m.avoidPlayerBlocks.get(), m.avoidTorchesNearby.get(), m.avoidTorchesRadius.get(), m.spiralTraversal.get()));
+            info(String.format("GridTorch — active=%s paused=%s previewing=%s xSpacing=%d zSpacing=%d maxDistX=%d maxDistZ=%d maxDip=%d minLight=%d water=%s breakGrass=%s breakTree=%s avoidPlayerBlocks=%s avoidTorchesNearby=%s avoidTorchesRadius=%d spiralTraversal=%s",
+                m.isActive(), m.isPaused(), m.isPreviewing(), m.xSpacing.get(), m.zSpacing.get(), m.maxDistX.get(), m.maxDistZ.get(), m.maxDip.get(), m.minLightLevel.get(), m.stopOnWater.get(), m.breakGrass.get(), m.breakTree.get(), m.avoidPlayerBlocks.get(), m.avoidTorchesNearby.get(), m.avoidTorchesRadius.get(), m.spiralTraversal.get()));
             return SINGLE_SUCCESS;
         }))
         // resetSettings: restore all config to defaults
@@ -100,7 +128,9 @@ public class CommandGridTorch extends Command {
                 m.zSpacing.set(zs);
 
                 if (!m.isActive()) m.toggle();
-                info("GridTorch started — xSpacing=" + xs + " zSpacing=" + zs);
+
+                if (m.isActive()) info("GridTorch started — xSpacing=" + xs + " zSpacing=" + zs + " — will place " + m.getPlannedTorchCount() + " torches");
+                else info("GridTorch could not start — check settings");
                 return SINGLE_SUCCESS;
             })
             // optional extended form: spacing + bounds
@@ -119,7 +149,8 @@ public class CommandGridTorch extends Command {
                 m.maxDistZ.set(mdz);
 
                 if (!m.isActive()) m.toggle();
-                info("GridTorch started — xSpacing=" + xs + " zSpacing=" + zs + " maxDistX=" + mdx + " maxDistZ=" + mdz);
+                if (m.isActive()) info("GridTorch started — xSpacing=" + xs + " zSpacing=" + zs + " maxDistX=" + mdx + " maxDistZ=" + mdz + " — will place " + m.getPlannedTorchCount() + " torches");
+                else info("GridTorch could not start — check settings");
                 return SINGLE_SUCCESS;
             }))))) ;
 
@@ -128,6 +159,8 @@ public class CommandGridTorch extends Command {
             GridTorch m = Modules.get().get(GridTorch.class);
             if (m == null) { info("GridTorch module not found"); return SINGLE_SUCCESS; }
             m.startPreview();
+            if (m.isPreviewing()) info("GridTorch preview — valid placements=" + m.getPlannedTorchCount() + " (visual only)");
+            else info("GridTorch preview not started (module already active?)");
             return SINGLE_SUCCESS;
         }).then(literal("stop").executes(ctx -> {
             GridTorch m = Modules.get().get(GridTorch.class);
@@ -237,6 +270,29 @@ public class CommandGridTorch extends Command {
             if (m == null) { info("GridTorch module not found"); return SINGLE_SUCCESS; }
             m.avoidPlayerBlocks.set(!m.avoidPlayerBlocks.get());
             info("GridTorch: avoidPlayerBlocks toggled to " + m.avoidPlayerBlocks.get());
+            return SINGLE_SUCCESS;
+        })));
+
+        // shouldSpiral toggle/set: /gridtorch shouldSpiral <true|false> OR /gridtorch shouldSpiral toggle
+        builder.then(literal("shouldSpiral").executes(ctx -> {
+            GridTorch m = Modules.get().get(GridTorch.class);
+            if (m == null) { info("GridTorch module not found"); return SINGLE_SUCCESS; }
+            info("shouldSpiral = " + m.spiralTraversal.get());
+            return SINGLE_SUCCESS;
+        }).then(argument("value", StringArgumentType.word()).executes(ctx -> {
+            boolean v = Boolean.parseBoolean(StringArgumentType.getString(ctx, "value"));
+            GridTorch m = Modules.get().get(GridTorch.class);
+            if (m == null) { info("GridTorch module not found"); return SINGLE_SUCCESS; }
+            m.spiralTraversal.set(v);
+            if (m.isActive()) m.applyTraversalModeNow();
+            info("GridTorch: shouldSpiral set to " + v);
+            return SINGLE_SUCCESS;
+        })).then(literal("toggle").executes(ctx -> {
+            GridTorch m = Modules.get().get(GridTorch.class);
+            if (m == null) { info("GridTorch module not found"); return SINGLE_SUCCESS; }
+            m.spiralTraversal.set(!m.spiralTraversal.get());
+            if (m.isActive()) m.applyTraversalModeNow();
+            info("GridTorch: shouldSpiral toggled to " + m.spiralTraversal.get());
             return SINGLE_SUCCESS;
         })));
     }

@@ -216,11 +216,18 @@ public class GridTorch extends Module {
     private boolean previewing = false;
     private boolean previewOnlyMode = false;
 
+    // Pause state: when out of resources (torches) we keep the module active but paused so
+    // the user can refill and resume later without losing the computed queue.
+    private boolean paused = false;
+
     /** Returns true when a visual preview (no placement) is active. */
     public boolean isPreviewing() { return previewing; }
 
     /** Returns true when the module was enabled solely for preview (no navigation/placement). */
     public boolean isPreviewOnly() { return previewOnlyMode; }
+
+    /** Returns true when the module is paused (preserves queue/state). */
+    public boolean isPaused() { return paused; }
 
     // Active target state
     private BlockPos currentPlacementTarget = null; // ground block under where the torch should be placed
@@ -316,6 +323,7 @@ public class GridTorch extends Module {
         // Stop preview if active
         previewing = false;
         previewOnlyMode = false;
+        paused = false;
 
         try {
             Object pb = getPrimaryBaritone();
@@ -352,6 +360,9 @@ public class GridTorch extends Module {
             toggle();
             return;
         }
+
+        // When paused we preserve the computed queue/state but do not progress navigation/placement.
+        if (paused) return;
 
         Object primaryBaritone = getPrimaryBaritone();
         if (primaryBaritone == null) {
@@ -442,17 +453,52 @@ public class GridTorch extends Module {
         // Render when module is active OR when user started a preview
         if (!(isActive() || previewing) || !visualize.get()) return;
 
-        // Render valid positions (green)
+        // Render valid positions (green) — skip & clean up any that already have a torch in-world
+        List<BlockPos> removed = new ArrayList<>();
         for (BlockPos bp : validPositions) {
+            try {
+                BlockState above = mc.world.getBlockState(bp.up());
+                if (above.getBlock() == Blocks.TORCH || above.getBlock() == Blocks.WALL_TORCH || above.getBlock() == Blocks.SOUL_TORCH || above.getBlock() == Blocks.SOUL_WALL_TORCH) {
+                    removed.add(bp);
+                    continue;
+                }
+            } catch (Throwable ignored) {
+            }
+
             Box b = new Box(bp);
             event.renderer.box(b, validColor.get(), validColor.get(), ShapeMode.Both, 0);
         }
 
+        // Keep preview lists in sync by removing already-placed positions
+        for (BlockPos r : removed) {
+            validPositions.remove(r);
+            supportNeededPositions.remove(r);
+            orderedPositions.remove(r);
+            queue.removeIf(p -> p.equals(r));
+        }
+
         // Preview-only: render support-needed positions (yellow)
         if (previewing) {
+            List<BlockPos> removedSupport = new ArrayList<>();
             for (BlockPos bp : supportNeededPositions) {
+                try {
+                    BlockState above = mc.world.getBlockState(bp.up());
+                    if (above.getBlock() == Blocks.TORCH || above.getBlock() == Blocks.WALL_TORCH || above.getBlock() == Blocks.SOUL_TORCH || above.getBlock() == Blocks.SOUL_WALL_TORCH) {
+                        removedSupport.add(bp);
+                        continue;
+                    }
+                } catch (Throwable ignored) {
+                }
+
                 Box b = new Box(bp);
                 event.renderer.box(b, supportColor.get(), supportColor.get(), ShapeMode.Both, 0);
+            }
+
+            for (BlockPos r : removedSupport) {
+                supportNeededPositions.remove(r);
+                validPositions.remove(r);
+                orderedPositions.remove(r);
+                queue.removeIf(p -> p.equals(r));
             }
         }
 
@@ -487,12 +533,21 @@ public class GridTorch extends Module {
         // For each X column build an allowed set of Zs (respecting water-boundary rule relative to origin)
         Map<Integer, Set<Integer>> allowedZByX = new HashMap<>();
 
-        for (int x = minX; x <= maxX; x += xSpacing.get()) {
+        // Build allowed Z sets for each X column using origin-aligned steps so the grid
+        // lattice always contains the origin regardless of `maxDist` not being a multiple of spacing.
+        final int sx = Math.max(1, xSpacing.get());
+        final int sz = Math.max(1, zSpacing.get());
+        final int maxStepsX = (int) Math.ceil(maxDistX.get() / (double) sx);
+
+        for (int stepX = -maxStepsX; stepX <= maxStepsX; stepX++) {
+            int x = originX + stepX * sx;
+            if (x < minX || x > maxX) continue; // keep within configured bounds
+
             Set<Integer> allowedZ = new HashSet<>();
 
             // positive direction from originZ -> maxZ
             boolean blockedPos = false;
-            for (int z = originZ; z <= maxZ; z += zSpacing.get()) {
+            for (int z = originZ; z <= maxZ; z += sz) {
                 if (stopOnWater.get() && !blockedPos && isSurfaceWater(x, z)) {
                     blockedPos = true;
                     continue; // this z is water -> boundary at this z
@@ -503,7 +558,7 @@ public class GridTorch extends Module {
 
             // negative direction from originZ -> minZ
             boolean blockedNeg = false;
-            for (int z = originZ; z >= minZ; z -= zSpacing.get()) {
+            for (int z = originZ; z >= minZ; z -= sz) {
                 if (stopOnWater.get() && !blockedNeg && isSurfaceWater(x, z)) {
                     blockedNeg = true;
                     continue;
@@ -515,32 +570,48 @@ public class GridTorch extends Module {
             allowedZByX.put(x, allowedZ);
         }
 
-        // Now generate row-major order with zigzag per-row and apply maxDip + basic terrain filtering
+        // Generate candidates origin-first (nearest-first) and apply maxDip + terrain filters.
         // NOTE: do NOT override `lastAcceptedY` here — the caller (onActivate/startPreview) decides whether
         // to anchor dip checks. This lets preview run with no dip-anchor while active runs still enforce dip.
 
-        int rowIndex = 0;
-        for (int x = minX; x <= maxX; x += xSpacing.get(), rowIndex++) {
-            boolean forward = (rowIndex % 2) == 0;
+        // Build X/Z coordinate lists then iterate by proximity to the origin so the dip-anchor
+        // (when set) is compared to nearby positions first instead of a distant corner.
+        // Build origin-aligned coordinate lists so the origin column/row is always present
+        final int stepsX = maxStepsX; // reuse value computed above
+        final int stepsZ = (int) Math.ceil(maxDistZ.get() / (double) sz);
 
-            if (forward) {
-                for (int z = minZ; z <= maxZ; z += zSpacing.get()) {
-                    if (!allowedZByX.getOrDefault(x, Collections.emptySet()).contains(z)) {
-                        AddonTemplate.LOG.debug("GridTorch: skipping candidate x={} z={} — not allowed in column (water-boundary?)", x, z);
-                        skippedPositions.add(new BlockPos(x, lastAcceptedY, z));
-                        continue;
-                    }
-                    evaluateAndAddCandidate(x, z);
+        List<Integer> xs = new ArrayList<>();
+        for (int i = -stepsX; i <= stepsX; i++) {
+            int x = originX + i * sx;
+            if (x < minX || x > maxX) continue;
+            xs.add(x);
+        }
+        xs.sort(Comparator.comparingInt(a -> Math.abs(a - originX)));
+
+        List<Integer> zsBase = new ArrayList<>();
+        for (int j = -stepsZ; j <= stepsZ; j++) {
+            int z = originZ + j * sz;
+            if (z < minZ || z > maxZ) continue;
+            zsBase.add(z);
+        }
+        zsBase.sort(Comparator.comparingInt(a -> Math.abs(a - originZ)));
+
+        for (int x : xs) {
+            Set<Integer> allowedZ = allowedZByX.getOrDefault(x, Collections.emptySet());
+            if (allowedZ.isEmpty()) {
+                // nothing allowed in this column (water-boundary), mark as skipped for the preview/diagnostics
+                for (int z : zsBase) skippedPositions.add(new BlockPos(x, lastAcceptedY, z));
+                continue;
+            }
+
+            for (int z : zsBase) {
+                if (!allowedZ.contains(z)) {
+                    AddonTemplate.LOG.debug("GridTorch: skipping candidate x={} z={} — not allowed in column (water-boundary?)", x, z);
+                    skippedPositions.add(new BlockPos(x, lastAcceptedY, z));
+                    continue;
                 }
-            } else {
-                for (int z = maxZ; z >= minZ; z -= zSpacing.get()) {
-                    if (!allowedZByX.getOrDefault(x, Collections.emptySet()).contains(z)) {
-                        AddonTemplate.LOG.debug("GridTorch: skipping candidate x={} z={} — not allowed in column (water-boundary?)", x, z);
-                        skippedPositions.add(new BlockPos(x, lastAcceptedY, z));
-                        continue;
-                    }
-                    evaluateAndAddCandidate(x, z);
-                }
+
+                evaluateAndAddCandidate(x, z);
             }
         }
 
@@ -557,6 +628,55 @@ public class GridTorch extends Module {
             orderedPositions.addAll(computeOptimizedRoute(validPositions, originPos));
             AddonTemplate.LOG.info("GridTorch: optimized route computed ({} positions)", orderedPositions.size());
         }
+    }
+
+    /**
+     * Recompute traversal order immediately and update the runtime queue so
+     * future placements follow the current `spiralTraversal` setting.
+     * Safe to call while GridTorch is active.
+     */
+    public void applyTraversalModeNow() {
+        precomputeGrid();
+        queue.clear();
+        if (!orderedPositions.isEmpty()) queue.addAll(orderedPositions); else queue.addAll(validPositions);
+        info("GridTorch: traversal order recomputed (spiral=" + spiralTraversal.get() + ")");
+    }
+
+    /** Pause the active module (preserve queue/state). Safe to call repeatedly. */
+    public void pause() {
+        if (paused) return;
+        paused = true;
+        try {
+            Object pb = getPrimaryBaritone();
+            if (pb != null) baritoneCancel(pb);
+        } catch (Throwable ignored) {}
+        info("GridTorch paused — use .gridtorch resume to continue");
+    }
+
+    /** Resume from a prior pause. Will submit the next nav goal if appropriate. */
+    public void resume() {
+        if (!paused) return;
+        paused = false;
+        info("GridTorch resumed");
+
+        try {
+            Object pb = getPrimaryBaritone();
+            if (pb != null && currentNavTarget == null && !queue.isEmpty()) submitNextNavGoal(pb);
+        } catch (Throwable ignored) {}
+    }
+
+    /**
+     * Number of valid placements computed by the last precompute (total planned torches).
+     */
+    public int getPlannedTorchCount() {
+        return validPositions.size();
+    }
+
+    /**
+     * Number of placements remaining in the run queue (if the module is active).
+     */
+    public int getRemainingPlacements() {
+        return queue.size();
     }
 
     private void evaluateAndAddCandidate(int x, int z) {
@@ -757,6 +877,7 @@ public class GridTorch extends Module {
             // If there's already a torch (including soul-torch variants) above the ground treat it as success — never break/replace torches.
             if (above.getBlock() == Blocks.TORCH || above.getBlock() == Blocks.WALL_TORCH
                 || above.getBlock() == Blocks.SOUL_TORCH || above.getBlock() == Blocks.SOUL_WALL_TORCH) {
+                clearPreviewFor(ground);
                 return true;
             }
 
@@ -792,8 +913,8 @@ public class GridTorch extends Module {
             // Ensure we have a torch in hotbar
             int torchSlot = findItemInHotbar(Items.TORCH);
             if (torchSlot == -1) {
-                info("Out of torches — disabling GridTorch");
-                toggle();
+                info("Out of torches — pausing GridTorch (use .gridtorch resume after refilling)");
+                pause();
                 return false;
             }
 
@@ -805,16 +926,23 @@ public class GridTorch extends Module {
 
             // Check result immediately — prefer a standing torch; accept wall torch only as fallback
             BlockState placed = mc.world.getBlockState(torchPos);
-            if (placed.getBlock() == Blocks.TORCH || placed.getBlock() == Blocks.SOUL_TORCH) return true;
+            if (placed.getBlock() == Blocks.TORCH || placed.getBlock() == Blocks.SOUL_TORCH) {
+                clearPreviewFor(ground);
+                return true;
+            }
 
             // Direct placement did not produce a standing torch. Try wall-torch fallback before other fallbacks.
             if (tryPlaceWallTorch(torchPos, torchSlot)) {
                 AddonTemplate.LOG.info("GridTorch: placed wall-torch fallback at {}", torchPos);
+                clearPreviewFor(ground);
                 return true;
             }
 
             // If a wall-torch was placed by the direct attempt (edge cases), accept it.
-            if (placed.getBlock() == Blocks.WALL_TORCH || placed.getBlock() == Blocks.SOUL_WALL_TORCH) return true;
+            if (placed.getBlock() == Blocks.WALL_TORCH || placed.getBlock() == Blocks.SOUL_WALL_TORCH) {
+                clearPreviewFor(ground);
+                return true;
+            }
 
             // Direct placement failed. If the ground *can* accept a torch we should NOT place a support block — attempt one retry then skip.
             if (surfaceAccepts) {
@@ -825,15 +953,22 @@ public class GridTorch extends Module {
                     new BlockHitResult(Vec3d.ofCenter(ground), Direction.UP, ground, false));
 
                 placed = mc.world.getBlockState(torchPos);
-                if (placed.getBlock() == Blocks.TORCH || placed.getBlock() == Blocks.SOUL_TORCH) return true;
+                if (placed.getBlock() == Blocks.TORCH || placed.getBlock() == Blocks.SOUL_TORCH) {
+                    clearPreviewFor(ground);
+                    return true;
+                }
 
                 // Try wall-torch fallback on retry
                 if (tryPlaceWallTorch(torchPos, torchSlot)) {
                     AddonTemplate.LOG.info("GridTorch: placed wall-torch fallback on retry at {}", torchPos);
+                    clearPreviewFor(ground);
                     return true;
                 }
 
-                if (placed.getBlock() == Blocks.WALL_TORCH || placed.getBlock() == Blocks.SOUL_WALL_TORCH) return true;
+                if (placed.getBlock() == Blocks.WALL_TORCH || placed.getBlock() == Blocks.SOUL_WALL_TORCH) {
+                    clearPreviewFor(ground);
+                    return true;
+                }
 
                 AddonTemplate.LOG.info("GridTorch: retry also failed at {} — skipping support placement", ground);
                 return false;
@@ -857,6 +992,7 @@ public class GridTorch extends Module {
             if (groundStateNow.getBlock() == Blocks.TORCH || groundStateNow.getBlock() == Blocks.WALL_TORCH
                 || groundStateNow.getBlock() == Blocks.SOUL_TORCH || groundStateNow.getBlock() == Blocks.SOUL_WALL_TORCH) {
                 // a torch already exists on the ground — treat as placed
+                clearPreviewFor(ground);
                 return true;
             }
 
@@ -886,7 +1022,9 @@ public class GridTorch extends Module {
                 new BlockHitResult(Vec3d.ofCenter(ground), Direction.UP, ground, false));
 
             placed = mc.world.getBlockState(torchPos);
-            return (placed.getBlock() == Blocks.TORCH || placed.getBlock() == Blocks.WALL_TORCH || placed.getBlock() == Blocks.SOUL_TORCH || placed.getBlock() == Blocks.SOUL_WALL_TORCH);
+            boolean success = (placed.getBlock() == Blocks.TORCH || placed.getBlock() == Blocks.WALL_TORCH || placed.getBlock() == Blocks.SOUL_TORCH || placed.getBlock() == Blocks.SOUL_WALL_TORCH);
+            if (success) clearPreviewFor(ground);
+            return success;
         } catch (Throwable t) {
             AddonTemplate.LOG.warn("GridTorch: failed to place torch at {}: {}", ground, t.toString());
             return false;
@@ -900,6 +1038,20 @@ public class GridTorch extends Module {
         } catch (Throwable ignored) {
             // Fallback: treat obviously non-air blocks as legal (best-effort)
             return !state.isAir();
+        }
+    }
+
+    /** Remove preview/route entries for a block that has been (or otherwise) placed. */
+    private void clearPreviewFor(BlockPos ground) {
+        try {
+            validPositions.remove(ground);
+            supportNeededPositions.remove(ground);
+            skippedPositions.remove(ground);
+            precomputed.remove(ground);
+            orderedPositions.remove(ground);
+            // remove matching entries from runtime queue
+            queue.removeIf(p -> p.equals(ground));
+        } catch (Throwable ignored) {
         }
     }
 
